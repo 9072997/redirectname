@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/caddyserver/certmagic"
 )
 
 func fallback(w http.ResponseWriter, r *http.Request, reason string) {
@@ -67,19 +69,75 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
+func getCacheDir() string {
+	// set by systemd
+	cacheDir := os.Getenv("CACHE_DIRECTORY")
+	if cacheDir == "" {
+		cacheDir = os.Getenv("STATE_DIRECTORY")
 	}
+	if cacheDir == "" {
+		cacheDir = os.Getenv("XDG_CACHE_HOME")
+	}
+	if cacheDir == "" {
+		cacheDir = os.Getenv("XDG_STATE_HOME")
+	}
+	if cacheDir == "" {
+		cacheDir = "/var/cache/redirectname"
+	}
+	// test if cacheDir exists
+	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
+		err = os.MkdirAll(cacheDir, 0700)
+		if err != nil {
+			log.Fatalf("Could not create cache directory: %v", err)
+		}
+	}
+	log.Printf("Using cache directory: %s", cacheDir)
+	return cacheDir
+}
 
-	http.HandleFunc("/", handler)
-	srv := &http.Server{
-		Addr:         ":" + port,
+func main() {
+	cmCfg := certmagic.NewDefault()
+	cacheDir := getCacheDir()
+	cmCfg.Storage = &certmagic.FileStorage{
+		Path: cacheDir,
+	}
+	cmCfg.OnDemand = &certmagic.OnDemandConfig{
+		DecisionFunc: PreCheck,
+	}
+	acmeCfg := certmagic.NewACMEIssuer(
+		cmCfg,
+		certmagic.DefaultACME,
+	)
+	acmeCfg.Agreed = true
+	acmeCfg.CA = certmagic.LetsEncryptStagingCA
+	h := http.HandlerFunc(handler)
+
+	// Start HTTP server
+	httpSrv := &http.Server{
+		Handler:      acmeCfg.HTTPChallengeHandler(h),
+		Addr:         ":80",
 		ReadTimeout:  2 * time.Second,
 		WriteTimeout: 2 * time.Second,
 	}
+	go func() {
+		log.Printf("Listening on http://0.0.0.0")
+		log.Fatal(httpSrv.ListenAndServe())
+	}()
 
-	log.Printf("Listening on http://127.0.0.1:%s", port)
-	log.Fatal(srv.ListenAndServe())
+	// Start HTTPS server
+	tlsCfg := cmCfg.TLSConfig()
+	tlsCfg.NextProtos = append(
+		[]string{"h2", "http/1.1"},
+		tlsCfg.NextProtos...,
+	)
+	httpsSrv := &http.Server{
+		Handler:   h,
+		Addr:      ":443",
+		TLSConfig: tlsCfg,
+		// slower because we might need to get a cert
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+	}
+	log.Printf("Listening on https://0.0.0.0")
+	log.Fatal(httpsSrv.ListenAndServeTLS("", ""))
 }
