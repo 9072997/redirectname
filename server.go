@@ -109,7 +109,7 @@ func main() {
 		certmagic.DefaultACME,
 	)
 	acmeCfg.Agreed = true
-	acmeCfg.CA = certmagic.LetsEncryptStagingCA
+	acmeCfg.CA = certmagic.LetsEncryptProductionCA
 	h := http.HandlerFunc(handler)
 
 	// Start HTTP server
